@@ -1,0 +1,12 @@
+2025-03-01 16:37:28,990 - INFO - 📌 Base de datos SQLite inicializada.
+2025-03-01 16:37:29,463 - WARNING - ⚠ No se encontró un token válido en la base de datos.
+2025-03-01 16:37:29,662 - INFO - 🔑 Solicitando autorización en Microsoft. Código de acceso generado.
+2025-03-01 16:38:36,971 - INFO - 💾 Token almacenado en la base de datos.
+2025-03-01 16:38:36,971 - INFO - 🔒 Token de acceso obtenido y almacenado en SQLite.
+2025-03-01 16:38:36,974 - INFO - Available AUTH mechanisms: LOGIN(builtin) PLAIN(builtin)
+2025-03-01 16:38:36,975 - INFO - Peer: ('127.0.0.1', 59238)
+2025-03-01 16:38:36,975 - INFO - ('127.0.0.1', 59238) handling connection
+2025-03-01 16:38:36,975 - INFO - ('127.0.0.1', 59238) EOF received
+2025-03-01 16:38:36,975 - INFO - ✅ SMTP relay iniciado en puerto 1025.
+2025-03-01 16:38:36,976 - INFO - ('127.0.0.1', 59238) Connection lost during _handle_client()
+2025-03-01 16:38:36,976 - INFO - ('127.0.0.1', 59238) connection lost

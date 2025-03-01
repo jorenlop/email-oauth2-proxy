@@ -4,13 +4,27 @@ import os
 import sqlite3
 import base64
 import smtplib
-import ssl
+import logging
 from aiosmtpd.controller import Controller
 from aiosmtpd.handlers import AsyncMessage
 from dotenv import load_dotenv
 from email.message import EmailMessage
 
-DB_FILE = "tokens.db"  # Base de datos para almacenar tokens
+DB_FILE = "tokens.db"  # Base de datos SQLite para almacenar tokens
+LOG_FILE = "smtp-relay.log"  # Archivo de logs persistente
+
+# Asegurarse de que el log es un archivo, no un directorio
+if os.path.exists(LOG_FILE) and os.path.isdir(LOG_FILE):
+    os.rmdir(LOG_FILE)  # Elimina el directorio si existe
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE),  # Guarda logs en archivo
+        logging.StreamHandler()  # También muestra en consola
+    ]
+)
 
 def init_db():
     """Inicializa la base de datos SQLite si no existe."""
@@ -25,6 +39,7 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
+    logging.info("📌 Base de datos SQLite inicializada.")
 
 class RelayHandler(AsyncMessage):
     def __init__(self, get_token_func, username):
@@ -37,11 +52,12 @@ class RelayHandler(AsyncMessage):
         rcpttos = message.get_all('To', []) + message.get_all('Cc', []) + message.get_all('Bcc', [])
         rcpttos = [addr.strip() for addr in rcpttos if addr.strip()]
         
+        logging.info(f"📨 Recibido correo de {mailfrom} para {', '.join(rcpttos)}")
+
         access_token = self.get_token_func()
         
         server = smtplib.SMTP("smtp.office365.com", 587)
-        context = ssl.create_default_context()
-        server.starttls(context=context)
+        server.starttls()
         server.ehlo()
 
         auth_string = f"user={self.username}\x01auth=Bearer {access_token}\x01\x01"
@@ -49,13 +65,17 @@ class RelayHandler(AsyncMessage):
         code, response = server.docmd("AUTH", "XOAUTH2 " + auth_encoded)
 
         if code != 235:
-            print("Error en autenticación SMTP:", code, response)
+            logging.error(f"❌ Error en autenticación SMTP: {code} - {response}")
             server.quit()
             return
 
-        server.send_message(message, from_addr=mailfrom, to_addrs=rcpttos)
-        server.quit()
-        print("Correo reenviado exitosamente a través de Office 365.")
+        try:
+            server.send_message(message, from_addr=mailfrom, to_addrs=rcpttos)
+            logging.info(f"✅ Correo enviado con éxito de {mailfrom} a {', '.join(rcpttos)}")
+        except Exception as e:
+            logging.error(f"🚨 Error enviando correo: {str(e)}")
+        finally:
+            server.quit()
 
 def get_device_code_token(app, scopes):
     """Obtiene un token a través del Device Code Flow."""
@@ -64,13 +84,17 @@ def get_device_code_token(app, scopes):
         raise ValueError("Error al iniciar Device Code Flow.", flow)
     
     print(flow['message'])
+    logging.info("🔑 Solicitando autorización en Microsoft. Código de acceso generado.")
+
     result = app.acquire_token_by_device_flow(flow)
     
     if "access_token" in result:
         save_token(result)
+        logging.info("🔒 Token de acceso obtenido y almacenado en SQLite.")
         return result
     else:
-        raise Exception("No se obtuvo access_token:", result.get("error_description", "Desconocido"))
+        logging.error(f"⚠ No se obtuvo access_token: {result.get('error_description', 'Desconocido')}")
+        raise Exception("No se obtuvo access_token.")
 
 def save_token(token):
     """Guarda el token en la base de datos SQLite."""
@@ -81,6 +105,7 @@ def save_token(token):
               (token["access_token"], token.get("refresh_token", ""), token.get("expires_in", 0)))
     conn.commit()
     conn.close()
+    logging.info("💾 Token almacenado en la base de datos.")
 
 def load_token():
     """Carga el token desde la base de datos SQLite."""
@@ -90,7 +115,9 @@ def load_token():
     row = c.fetchone()
     conn.close()
     if row:
+        logging.info("🔍 Token recuperado desde la base de datos.")
         return {"access_token": row[0], "refresh_token": row[1], "expires_in": row[2]}
+    logging.warning("⚠ No se encontró un token válido en la base de datos.")
     return None
 
 def main():
@@ -118,7 +145,7 @@ def main():
         if new_result:
             token_result = new_result
         else:
-            print("Token expirado. Renovando...")
+            logging.warning("⚠ Token expirado. Renovando...")
             token_result = get_device_code_token(app, scopes)
         
         save_token(token_result)
@@ -127,12 +154,13 @@ def main():
     handler = RelayHandler(get_token_func=get_current_access_token, username=USERNAME)
     controller = Controller(handler, hostname='0.0.0.0', port=1025)
     controller.start()
-    print("✅ SMTP relay iniciado en puerto 1025.")
+    logging.info("✅ SMTP relay iniciado en puerto 1025.")
     
     try:
-        asyncio.run(asyncio.sleep(3600))
+        while True:
+            asyncio.run(asyncio.sleep(3600))
     except KeyboardInterrupt:
-        pass
+        logging.info("🛑 Servicio detenido manualmente.")
     finally:
         controller.stop()
 

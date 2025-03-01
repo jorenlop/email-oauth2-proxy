@@ -11,5 +11,6 @@ services:
       - PYTHONUNBUFFERED=1
     volumes:
       - ./token_cache.json:/app/token_cache.json
+      - ./smtp-relay.log:/app/smtp-relay.log
     env_file:
       - .env
