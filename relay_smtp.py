@@ -1,128 +1,136 @@
 import asyncio
 import msal
 import os
-import json
+import sqlite3
 import base64
 import smtplib
+import ssl
 from aiosmtpd.controller import Controller
 from aiosmtpd.handlers import AsyncMessage
 from dotenv import load_dotenv
 from email.message import EmailMessage
 
-TOKEN_FILE = "/app/token_cache.json"  # Ruta del archivo de token dentro del contenedor
+DB_FILE = "tokens.db"  # Base de datos para almacenar tokens
+
+def init_db():
+    """Inicializa la base de datos SQLite si no existe."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS tokens (
+            access_token TEXT,
+            refresh_token TEXT,
+            expires_at INTEGER
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
 class RelayHandler(AsyncMessage):
-    """
-    Handler que recibe los mensajes SMTP y los reenvía a Office 365
-    usando autenticación OAuth2 (MSAL).
-    """
     def __init__(self, get_token_func, username):
         super().__init__()
         self.get_token_func = get_token_func
         self.username = username
 
     async def handle_message(self, message):
-        print("📩 Correo recibido, procesando...", flush=True)
-        
         mailfrom = message['From']
-        rcpttos = (
-            message.get_all('To', []) +
-            message.get_all('Cc', []) +
-            message.get_all('Bcc', [])
-        )
+        rcpttos = message.get_all('To', []) + message.get_all('Cc', []) + message.get_all('Bcc', [])
         rcpttos = [addr.strip() for addr in rcpttos if addr.strip()]
         
         access_token = self.get_token_func()
-
+        
         server = smtplib.SMTP("smtp.office365.com", 587)
-        server.starttls()
+        context = ssl.create_default_context()
+        server.starttls(context=context)
         server.ehlo()
 
-        # Autenticación OAuth2
         auth_string = f"user={self.username}\x01auth=Bearer {access_token}\x01\x01"
         auth_encoded = base64.b64encode(auth_string.encode('ascii')).decode('ascii')
         code, response = server.docmd("AUTH", "XOAUTH2 " + auth_encoded)
 
         if code != 235:
-            print(f"❌ Error en autenticación SMTP: {code}, {response}", flush=True)
+            print("Error en autenticación SMTP:", code, response)
             server.quit()
             return
 
         server.send_message(message, from_addr=mailfrom, to_addrs=rcpttos)
         server.quit()
-        print("✅ Correo reenviado exitosamente a través de Office 365.", flush=True)
+        print("Correo reenviado exitosamente a través de Office 365.")
 
 def get_device_code_token(app, scopes):
-    """Realiza el Device Code Flow y devuelve el token de acceso y refresh_token."""
+    """Obtiene un token a través del Device Code Flow."""
     flow = app.initiate_device_flow(scopes=scopes)
-    
     if 'user_code' not in flow:
-        raise ValueError("No se pudo iniciar el Device Code Flow.", flow)
+        raise ValueError("Error al iniciar Device Code Flow.", flow)
     
-    print(flow['message'], flush=True)  # Muestra el código de autenticación
+    print(flow['message'])
     result = app.acquire_token_by_device_flow(flow)
-
+    
     if "access_token" in result:
-        with open(TOKEN_FILE, "w") as f:
-            json.dump(result, f)  # Guardamos el token
+        save_token(result)
         return result
     else:
         raise Exception("No se obtuvo access_token:", result.get("error_description", "Desconocido"))
 
-def load_token_cache():
-    """Carga el token desde el archivo cache si existe y es válido."""
-    if os.path.exists(TOKEN_FILE):
-        try:
-            with open(TOKEN_FILE, "r") as f:
-                data = f.read().strip()
-                if not data:  # Si el archivo está vacío
-                    return None
-                return json.loads(data)  # Decodifica JSON
-        except json.JSONDecodeError:
-            print("⚠ Error: token_cache.json está corrupto. Se regenerará.", flush=True)
-            return None
+def save_token(token):
+    """Guarda el token en la base de datos SQLite."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM tokens")  # Limpia tokens anteriores
+    c.execute("INSERT INTO tokens (access_token, refresh_token, expires_at) VALUES (?, ?, ?)",
+              (token["access_token"], token.get("refresh_token", ""), token.get("expires_in", 0)))
+    conn.commit()
+    conn.close()
+
+def load_token():
+    """Carga el token desde la base de datos SQLite."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT access_token, refresh_token, expires_at FROM tokens")
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return {"access_token": row[0], "refresh_token": row[1], "expires_in": row[2]}
     return None
 
 def main():
     load_dotenv()
+    init_db()
+    
     TENANT_ID = os.getenv("TENANT_ID")
     CLIENT_ID = os.getenv("CLIENT_ID")
     USERNAME = os.getenv("USERNAME")
-
+    
     authority = f"https://login.microsoftonline.com/{TENANT_ID}"
     app = msal.PublicClientApplication(client_id=CLIENT_ID, authority=authority)
     scopes = ["https://outlook.office365.com/.default"]
-
-    token_result = load_token_cache()
-
+    
+    token_result = load_token()
     if not token_result:
         token_result = get_device_code_token(app, scopes)
-
+    
     def get_current_access_token():
-        """Maneja la renovación automática del token."""
+        """Devuelve un access_token válido, renovándolo si es necesario."""
         nonlocal token_result
         accounts = app.get_accounts()
         new_result = app.acquire_token_silent(scopes, account=accounts[0] if accounts else None)
-
+        
         if new_result:
             token_result = new_result
         else:
-            print("⚠ Token expirado, obteniendo nuevo...", flush=True)
+            print("Token expirado. Renovando...")
             token_result = get_device_code_token(app, scopes)
-
-        with open(TOKEN_FILE, "w") as f:
-            json.dump(token_result, f)  # Guardar el token actualizado
+        
+        save_token(token_result)
         return token_result["access_token"]
-
+    
     handler = RelayHandler(get_token_func=get_current_access_token, username=USERNAME)
     controller = Controller(handler, hostname='0.0.0.0', port=1025)
     controller.start()
+    print("✅ SMTP relay iniciado en puerto 1025.")
     
-    print("✅ SMTP relay iniciado en puerto 1025.", flush=True)
-
     try:
-        loop = asyncio.get_event_loop()
-        loop.run_forever()  # Mantiene el script en ejecución
+        asyncio.run(asyncio.sleep(3600))
     except KeyboardInterrupt:
         pass
     finally:
