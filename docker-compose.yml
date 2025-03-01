@@ -1,0 +1,15 @@
+version: '3.2'
+
+services:
+  smtp-relay:
+    build: .
+    container_name: smtp-relay
+    restart: always
+    ports:
+      - "1025:1025"
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./token_cache.json:/app/token_cache.json
+    env_file:
+      - .env
